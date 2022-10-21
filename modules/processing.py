@@ -12,7 +12,7 @@ from skimage import exposure
 from typing import Any, Dict, List, Optional
 
 import modules.sd_hijack
-from modules import devices, prompt_parser, masking, sd_samplers, lowvram
+from modules import devices, prompt_parser, masking, sd_samplers, lowvram, generation_parameters_copypaste
 from modules.sd_hijack import model_hijack
 from modules.shared import opts, cmd_opts, state
 import modules.shared as shared
@@ -304,7 +304,7 @@ def create_infotext(p, all_prompts, all_seeds, all_subseeds, comments, iteration
         "Size": f"{p.width}x{p.height}",
         "Model hash": getattr(p, 'sd_model_hash', None if not opts.add_model_hash_to_info or not shared.sd_model.sd_model_hash else shared.sd_model.sd_model_hash),
         "Model": (None if not opts.add_model_name_to_info or not shared.sd_model.sd_checkpoint_info.model_name else shared.sd_model.sd_checkpoint_info.model_name.replace(',', '').replace(':', '')),
-        "Hypernet": (None if shared.loaded_hypernetwork is None else shared.loaded_hypernetwork.filename.split('\\')[-1].split('.')[0]),
+        "Hypernet": (None if shared.loaded_hypernetwork is None else shared.loaded_hypernetwork.name),
         "Batch size": (None if p.batch_size < 2 else p.batch_size),
         "Batch pos": (None if p.batch_size < 2 else position_in_batch),
         "Variation seed": (None if p.subseed_strength == 0 else all_subseeds[index]),
@@ -318,7 +318,7 @@ def create_infotext(p, all_prompts, all_seeds, all_subseeds, comments, iteration
 
     generation_params.update(p.extra_generation_params)
 
-    generation_params_text = ", ".join([k if k == v else f'{k}: {v}' for k, v in generation_params.items() if v is not None])
+    generation_params_text = ", ".join([k if k == v else f'{k}: {generation_parameters_copypaste.quote(v)}' for k, v in generation_params.items() if v is not None])
 
     negative_prompt_text = "\nNegative prompt: " + p.negative_prompt if p.negative_prompt else ""
 
@@ -540,11 +540,10 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
             self.truncate_x = int(self.firstphase_width - firstphase_width_truncated) // opt_f
             self.truncate_y = int(self.firstphase_height - firstphase_height_truncated) // opt_f
 
-
-    def create_dummy_mask(self, x, first_phase: bool = False):
+    def create_dummy_mask(self, x, width=None, height=None):
         if self.sampler.conditioning_key in {'hybrid', 'concat'}:
-            height = self.firstphase_height if first_phase else self.height
-            width = self.firstphase_width if first_phase else self.width
+            height = height or self.height
+            width = width or self.width
 
             # The "masked-image" in this case will just be all zeros since the entire image is masked.
             image_conditioning = torch.zeros(x.shape[0], 3, height, width, device=x.device)
@@ -571,7 +570,7 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
             return samples
 
         x = create_random_tensors([opt_C, self.firstphase_height // opt_f, self.firstphase_width // opt_f], seeds=seeds, subseeds=subseeds, subseed_strength=self.subseed_strength, seed_resize_from_h=self.seed_resize_from_h, seed_resize_from_w=self.seed_resize_from_w, p=self)
-        samples = self.sampler.sample(self, x, conditioning, unconditional_conditioning, image_conditioning=self.create_dummy_mask(x, first_phase=True))
+        samples = self.sampler.sample(self, x, conditioning, unconditional_conditioning, image_conditioning=self.create_dummy_mask(x, self.firstphase_width, self.firstphase_height))
 
         samples = samples[:, :, self.truncate_y//2:samples.shape[2]-self.truncate_y//2, self.truncate_x//2:samples.shape[3]-self.truncate_x//2]
 
@@ -634,6 +633,7 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         self.inpainting_mask_invert = inpainting_mask_invert
         self.mask = None
         self.nmask = None
+        self.image_conditioning = None
 
     def init(self, all_prompts, all_seeds, all_subseeds):
         self.sampler = sd_samplers.create_sampler_with_index(sd_samplers.samplers_for_img2img, self.sampler_index, self.sd_model)
@@ -735,9 +735,7 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             elif self.inpainting_fill == 3:
                 self.init_latent = self.init_latent * self.mask
 
-        conditioning_key = self.sampler.conditioning_key
-
-        if conditioning_key in {'hybrid', 'concat'}:
+        if self.sampler.conditioning_key in {'hybrid', 'concat'}:
             if self.image_mask is not None:
                 conditioning_mask = np.array(self.image_mask.convert("L"))
                 conditioning_mask = conditioning_mask.astype(np.float32) / 255.0
